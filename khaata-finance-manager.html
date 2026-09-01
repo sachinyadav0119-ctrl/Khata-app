@@ -6,6 +6,35 @@
 <title>Khaata — Personal Finance Manager</title>
 <!-- ==================================================================
      KHAATA — BUILD LOG
+     Sprint 45 — App.Accounts.Edit + App.Accounts.Split (additive, on
+     top of the Accounts module that already existed — Cash + multiple
+     Bank/UPI/Savings/Credit Card/Other accounts, each with its own
+     balance auto-computed from linked transactions via
+     accountBalance())
+       App version bumped: 1.39.0 -> 1.40.0
+       What's new:
+         1. Edit Account — the Accounts tab card grid now has an
+            "Edit" button alongside Deactivate/Delete. Clicking it
+            swaps that one card (via editingAcctId, purely a UI
+            toggle) into an inline form (name/type/icon/opening
+            balance) with Save/Cancel, reusing the same form-grid
+            styling as "Add Account". Saving only updates the
+            account's own fields (state.accounts entry) — it never
+            touches state.transactions, so accountBalance()'s
+            transaction-driven math is unaffected; the opening
+            balance is just a new starting point for that same math.
+         2. Cash vs Online split — a small KPI row (#cashOnlineSplit)
+            above the account grid showing two live totals: Cash
+            (sum of accountBalance() for type==='Cash' accounts) and
+            Online (sum for type in Bank Account/UPI/Savings Account).
+            Credit Card/Other are deliberately left out of this
+            specific split (they're liabilities/other, not "cash" or
+            "online" money) — untouched everywhere else (Net Worth,
+            Credit Cards module, etc).
+       Nothing existing was removed, renamed, or restyled — all other
+       tabs, the transaction/transfer forms, and accountBalance()
+       itself are unchanged.
+     ------------------------------------------------------------------
      Sprint 44 — Deeper Rule-Based Intelligence, Part 3 of 3 (phrasing
      variety + widened unclear fallback, App.Chat — additive only, no
      external AI API)
@@ -4722,6 +4751,8 @@ body.kh-more-open #fabBtn.kh-fab-trigger:active{transform:scale(.92);}
         <div class="card-title">Your Accounts</div>
         <div class="card-note" id="totalMoneyNote"></div>
       </div>
+      <!-- Sprint 45 — App.Accounts.Split: Cash vs Online (Bank Account+UPI+Savings Account) balance summary, additive, sits above the account grid -->
+      <div class="kpi-grid" id="cashOnlineSplit" style="margin-bottom:14px;"></div>
       <div class="acct-grid" id="acctGrid"></div>
     </div>
     <div class="card">
@@ -5815,7 +5846,7 @@ Object.assign(App.Config, {
   LEGACY_FOOD_ITEM_CATS, DEFAULT_SUBCATS, CATEGORY_KEYWORDS,
   ACCOUNT_TYPES, ACCOUNT_ICONS,
   STORAGE_PREFIX: 'khaata:',
-  VERSION: '1.39.0'
+  VERSION: '1.40.0'
 });
 
 let state = {
@@ -5862,6 +5893,7 @@ let currentEntryType = "expense";
 let lastDeleted = null; // {txn, index} for undo
 let quickAddType = "expense";
 let quickAddAmount = null;
+let editingAcctId = null; // Sprint 45 — App.Accounts.Edit: id of the account card currently in inline-edit mode, or null
 
 const fmt = n => "₹" + (Number(n)||0).toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:2});
 const todayStr = () => new Date().toISOString().slice(0,10);
@@ -8558,17 +8590,66 @@ function renderAccounts(){
   else{
     grid.innerHTML = state.accounts.map(a=>{
       const bal = accountBalance(a.id);
+      // Sprint 45 — App.Accounts.Edit: edit mode swaps the display block for an inline
+      // name/type/icon/opening-balance form; toggled purely client-side via editingAcctId,
+      // nothing here touches accountBalance()'s transaction-driven math — only the
+      // account's own opening/name/type/icon fields are editable.
+      if(editingAcctId===a.id){
+        return `<div class="acct-card editing" data-id="${a.id}">
+          <div class="form-grid">
+            <div><label>Name</label><input type="text" class="ea_name" value="${a.name.replace(/"/g,'&quot;')}"></div>
+            <div><label>Type</label>
+              <select class="ea_type">
+                ${ACCOUNT_TYPES.map(t=>`<option value="${t}" ${t===a.type?'selected':''}>${t}</option>`).join('')}
+              </select>
+            </div>
+            <div><label>Opening Balance (₹)</label><input type="number" class="ea_opening" step="0.01" value="${Number(a.opening)||0}"></div>
+            <div><label>Icon</label>
+              <select class="ea_icon">
+                ${Object.keys(ACCOUNT_ICONS).map(t=>`<option value="${ACCOUNT_ICONS[t]}" ${ACCOUNT_ICONS[t]===a.icon?'selected':''}>${ACCOUNT_ICONS[t]} ${t}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="acct-actions">
+            <button class="btn small save-acct">Save</button>
+            <button class="btn small secondary cancel-acct">Cancel</button>
+          </div>
+        </div>`;
+      }
       return `<div class="acct-card ${a.active===false?'inactive':''}" data-id="${a.id}">
         <div class="acct-ic">${a.icon||'📦'}</div>
         <div class="acct-name">${a.name}</div>
         <div class="acct-type">${a.type}</div>
         <div class="acct-bal" style="color:${bal<0?'var(--rust)':'var(--teal)'};">${fmt(bal)}</div>
         <div class="acct-actions">
+          <button class="btn small secondary edit-acct">Edit</button>
           <button class="btn small secondary toggle-acct">${a.active===false?'Activate':'Deactivate'}</button>
           <button class="btn small rust del-acct">Delete</button>
         </div>
       </div>`;
     }).join('');
+    grid.querySelectorAll('.edit-acct').forEach(b=>b.addEventListener('click', e=>{
+      editingAcctId = e.target.closest('.acct-card').dataset.id;
+      renderAccounts();
+    }));
+    grid.querySelectorAll('.cancel-acct').forEach(b=>b.addEventListener('click', e=>{
+      editingAcctId = null;
+      renderAccounts();
+    }));
+    grid.querySelectorAll('.save-acct').forEach(b=>b.addEventListener('click', async e=>{
+      const card = e.target.closest('.acct-card');
+      const id = card.dataset.id;
+      const a = accountById(id);
+      const name = card.querySelector('.ea_name').value.trim();
+      if(!name){ alert('Enter an account name.'); return; }
+      a.name = name;
+      a.type = card.querySelector('.ea_type').value;
+      a.opening = parseFloat(card.querySelector('.ea_opening').value)||0;
+      a.icon = card.querySelector('.ea_icon').value;
+      editingAcctId = null;
+      await saveAccounts();
+      renderAccounts(); populateAccountSelects(); refreshAllCharts();
+    }));
     grid.querySelectorAll('.toggle-acct').forEach(b=>b.addEventListener('click', async e=>{
       const id = e.target.closest('.acct-card').dataset.id;
       const a = accountById(id); a.active = a.active===false ? true : false;
@@ -8582,6 +8663,23 @@ function renderAccounts(){
     }));
   }
   document.getElementById('totalMoneyNote').textContent = `Total money across active accounts: ${fmt(totalMoney())}`;
+
+  // Sprint 45 — App.Accounts.Split: Cash total vs Online total (Bank Account + UPI + Savings Account).
+  // Credit Card / Other are intentionally excluded from this two-way split — they're covered
+  // elsewhere (Net Worth liabilities / Credit Cards module) and don't cleanly fit "cash" or "online".
+  const splitEl = document.getElementById('cashOnlineSplit');
+  if(splitEl){
+    const ONLINE_TYPES = ['Bank Account','UPI','Savings Account'];
+    let cashTotal = 0, onlineTotal = 0;
+    activeAccounts().forEach(a=>{
+      if(a.type==='Cash') cashTotal += accountBalance(a.id);
+      else if(ONLINE_TYPES.includes(a.type)) onlineTotal += accountBalance(a.id);
+    });
+    splitEl.innerHTML = `
+      <div class="kpi income"><div class="kpi-label">💵 Cash mein</div><div class="kpi-value">${fmt(cashTotal)}</div></div>
+      <div class="kpi savings"><div class="kpi-label">🏦 Online mein (Bank/UPI/Savings)</div><div class="kpi-value">${fmt(onlineTotal)}</div></div>
+    `;
+  }
 
   const nw = document.getElementById('netWorthKpis');
   const assets = netWorthAssets();
